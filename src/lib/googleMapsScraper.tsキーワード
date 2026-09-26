@@ -1,0 +1,348 @@
+import { chromium } from "playwright";
+
+export interface ScrapedReview {
+  "Author Name": string | null;
+  Rating: number | null;
+  Comment: string;
+  reviewImageUrls?: string[];
+}
+
+export interface ScrapedBusinessData {
+  businessName: string | null;
+  rating: number | null;
+  reviewCount: number | null;
+  address: string | null;
+  phone: string | null;
+  category: string | null;
+  website: string | null;
+  hours: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  businessImageUrls: string[];
+  reviews: ScrapedReview[];
+}
+
+/**
+ * Robust local Google Maps scraper using Playwright Chromium.
+ */
+export async function scrapeGoogleMaps(
+  url: string,
+  maxImages: number = 50,
+  maxReviews: number = 50
+): Promise<ScrapedBusinessData> {
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-blink-features=AutomationControlled",
+      "--lang=en-US",
+    ],
+  });
+
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    locale: "en-US",
+    extraHTTPHeaders: {
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+  });
+
+  const page = await context.newPage();
+
+  try {
+    // 1. Navigate & follow redirects
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    } catch (err: any) {
+      throw new Error(`Could not load Google Maps page: ${err.message || "Timeout/Navigation error"}`);
+    }
+
+    // 2. Handle Google Consent popup if encountered
+    try {
+      const consentBtn = page.locator(
+        'button[aria-label*="Accept"], button:has-text("Accept all"), form[action*="consent"] button, button:has-text("I agree")'
+      );
+      if ((await consentBtn.count()) > 0) {
+        await consentBtn.first().click();
+        await page.waitForTimeout(2000);
+      }
+    } catch {
+      // Ignore consent click error if not present
+    }
+
+    // Wait for core main panel or title to load
+    await page.waitForSelector("h1, div[role=\"main\"]", { timeout: 12000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+
+    const finalUrl = page.url();
+
+    // Validate that we ended up on Google Maps
+    if (!finalUrl.includes("google.com/maps") && !finalUrl.includes("maps.google.com")) {
+      throw new Error("Could not load Google Maps page. Navigated URL is not a valid Google Maps location.");
+    }
+
+    // 3. Extract Coordinates (Latitude & Longitude)
+    let latitude: number | null = null;
+    let longitude: number | null = null;
+
+    const urlCoordsMatch = finalUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (urlCoordsMatch) {
+      latitude = parseFloat(urlCoordsMatch[1]);
+      longitude = parseFloat(urlCoordsMatch[2]);
+    } else {
+      const dataCoordsMatch = finalUrl.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+      if (dataCoordsMatch) {
+        latitude = parseFloat(dataCoordsMatch[1]);
+        longitude = parseFloat(dataCoordsMatch[2]);
+      }
+    }
+
+    // 4. Extract Business Name
+    let businessName: string | null = null;
+    const h1Count = await page.locator("h1").count();
+    if (h1Count > 0) {
+      const text = (await page.locator("h1").first().innerText()).trim();
+      if (text) businessName = text;
+    }
+
+    if (!businessName) {
+      const title = await page.title();
+      if (title && !title.toLowerCase().startsWith("google maps")) {
+        businessName = title.replace(/\s*-\s*Google Maps\s*/i, "").trim();
+      }
+    }
+
+    // 5. Extract Rating & Review Count
+    const ratingReviewData = await page.evaluate(() => {
+      let r: number | null = null;
+      let rc: number | null = null;
+
+      // Check aria-labels across elements
+      const ariaElements = Array.from(document.querySelectorAll("[aria-label]"));
+      for (const el of ariaElements) {
+        const aria = el.getAttribute("aria-label") || "";
+        if (r === null) {
+          const m = aria.match(/(\d\.\d)\s*stars?/i);
+          if (m) r = parseFloat(m[1]);
+        }
+        if (rc === null) {
+          const m = aria.match(/([\d,]+)\s*reviews?/i);
+          if (m) rc = parseInt(m[1].replace(/,/g, ""), 10);
+        }
+      }
+
+      // DOM fallback selectors
+      if (r === null) {
+        const ratingSpan = document.querySelector("div.F7L8fd span[aria-hidden=\"true\"], span.ce3T27, span.fontDisplayLarge");
+        if (ratingSpan) {
+          const val = parseFloat((ratingSpan as HTMLElement).innerText.trim());
+          if (!isNaN(val) && val >= 1 && val <= 5) r = val;
+        }
+      }
+
+      if (rc === null) {
+        const countSpan = document.querySelector("button[jsaction*=\"review\"] span, span.F7L8fd, span.EHPhf");
+        if (countSpan) {
+          const m = (countSpan as HTMLElement).innerText.match(/([\d,]+)/);
+          if (m) rc = parseInt(m[1].replace(/,/g, ""), 10);
+        }
+      }
+
+      return { rating: r, reviewCount: rc };
+    });
+
+    // 6. Extract Address, Phone, Category, Website, Opening Hours
+    const details = await page.evaluate(() => {
+      let address: string | null = null;
+      let phone: string | null = null;
+      let category: string | null = null;
+      let website: string | null = null;
+      let hours: string | null = null;
+
+      // Category
+      const catBtn = document.querySelector("button[jsaction*=\"category\"]");
+      if (catBtn) {
+        category = (catBtn as HTMLElement).innerText.trim();
+      } else {
+        const catSpan = document.querySelector("button.DkEaL, span.DkEaL");
+        if (catSpan) category = (catSpan as HTMLElement).innerText.trim();
+      }
+
+      // Buttons with data-item-id
+      const itemBtns = Array.from(document.querySelectorAll("[data-item-id]"));
+      for (const btn of itemBtns) {
+        const itemId = btn.getAttribute("data-item-id") || "";
+        const text = ((btn as HTMLElement).innerText || "").trim();
+        const aria = btn.getAttribute("aria-label") || "";
+
+        if (itemId === "address" || itemId.includes("address")) {
+          address = text.replace(/^[\n\s]+/, "").trim() || aria.replace(/^Address:\s*/i, "").trim() || null;
+        } else if (itemId.startsWith("phone")) {
+          phone = text.replace(/^[\n\s]+/, "").trim() || aria.replace(/^Phone:\s*/i, "").trim() || null;
+        } else if (itemId === "authority") {
+          website =
+            text.replace(/^[\n\s]+/, "").trim() ||
+            btn.getAttribute("href") ||
+            aria.replace(/^Website:\s*/i, "").trim() ||
+            null;
+        } else if (itemId.includes("oh") || aria.toLowerCase().includes("hours")) {
+          hours = aria || text || null;
+        }
+      }
+
+      return { address, phone, category, website, hours };
+    });
+
+    // 7. Extract Business Images
+    const businessImageUrls = await page.evaluate(
+      ({ limit }) => {
+        const urlsSet = new Set<string>();
+
+        // DOM Image Tags
+        const imgElements = Array.from(document.querySelectorAll("img"));
+        for (const img of imgElements) {
+          let src = img.getAttribute("src");
+          if (src && (src.includes("googleusercontent.com") || src.includes("ggpht.com"))) {
+            if (!src.includes("avatar") && !src.includes("user") && !src.includes("logo") && !src.includes("cleardot")) {
+              src = src.replace(/=w\d+-h\d+.*$/, "=s1600").replace(/=s\d+.*$/, "=s1600");
+              urlsSet.add(src);
+            }
+          }
+        }
+
+        // Script State Fallback for extra images
+        if (urlsSet.size < limit && (window as any).APP_INITIALIZATION_STATE) {
+          try {
+            const rawStr = JSON.stringify((window as any).APP_INITIALIZATION_STATE);
+            const matches = rawStr.match(/https:\/\/[^"\\]+(?:googleusercontent|ggpht)[^"\\]+/g) || [];
+            for (let m of matches) {
+              if (!m.includes("avatar") && !m.includes("user") && !m.includes("logo") && !m.includes("cleardot")) {
+                m = m.replace(/=w\d+-h\d+.*$/, "=s1600").replace(/=s\d+.*$/, "=s1600");
+                urlsSet.add(m);
+                if (urlsSet.size >= limit * 2) break;
+              }
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        }
+
+        return Array.from(urlsSet).slice(0, limit);
+      },
+      { limit: maxImages }
+    );
+
+    // 8. Extract Reviews
+    let reviews: ScrapedReview[] = [];
+    if (maxReviews > 0) {
+      const reviewsTab = page
+        .locator('button[role="tab"], button[data-tab-index]')
+        .filter({ hasText: /Reviews/i })
+        .first();
+
+      if ((await reviewsTab.count()) > 0) {
+        await reviewsTab.click().catch(() => {});
+        await page.waitForTimeout(3000);
+
+        // Scroll review container to load more reviews
+        const scrollPane = page.locator('div.m6QEwb[role="region"], div.m6QEwb').first();
+        if ((await scrollPane.count()) > 0) {
+          const scrollCount = Math.min(10, Math.ceil(maxReviews / 5));
+          for (let i = 0; i < scrollCount; i++) {
+            await scrollPane.evaluate((el) => (el.scrollTop += 2000)).catch(() => {});
+            await page.waitForTimeout(600);
+          }
+        }
+
+        reviews = await page.evaluate(
+          ({ limit }) => {
+            const reviewEls = Array.from(
+              document.querySelectorAll("div[data-review-id], div.jJCo2e, div.gws-localreviews__google-review, div.WMwTyd")
+            );
+
+            const result: ScrapedReview[] = [];
+            const seenKeys = new Set<string>();
+
+            for (const el of reviewEls) {
+              if (result.length >= limit) break;
+
+              const authorEl = el.querySelector(".d4r55, .TSZ13b, .X43p2b");
+              const author = authorEl ? (authorEl as HTMLElement).innerText.trim() : null;
+
+              let ratingVal: number | null = null;
+              const ratingEl = el.querySelector('span[role="img"][aria-label*="star"], span[aria-label*="stars"]');
+              if (ratingEl) {
+                const aria = ratingEl.getAttribute("aria-label") || "";
+                const m = aria.match(/(\d+(\.\d+)?)/);
+                if (m) ratingVal = parseFloat(m[1]);
+              }
+
+              const commentEl = el.querySelector(".wiC3df, .MyWfle, .K838ce, span.break-word, .rNbW2d");
+              const comment = commentEl ? (commentEl as HTMLElement).innerText.trim() : "";
+
+              const revImgs: string[] = [];
+              const imgEls = Array.from(
+                el.querySelectorAll('button[aria-label*="photo"] img, img[src*="googleusercontent.com"], img[src*="ggpht.com"]')
+              );
+              for (const img of imgEls) {
+                let src = img.getAttribute("src");
+                if (src && !src.includes("avatar") && !src.includes("user")) {
+                  src = src.replace(/=w\d+-h\d+.*$/, "=s1600").replace(/=s\d+.*$/, "=s1600");
+                  revImgs.push(src);
+                }
+              }
+
+              // Filter out duplicates and empty review objects
+              const dedupeKey = `${author || ""}_${ratingVal}_${comment.slice(0, 30)}`;
+              if ((author || comment || ratingVal !== null) && !seenKeys.has(dedupeKey)) {
+                seenKeys.add(dedupeKey);
+                result.push({
+                  "Author Name": author,
+                  Rating: ratingVal,
+                  Comment: comment,
+                  reviewImageUrls: revImgs,
+                });
+              }
+            }
+
+            return result;
+          },
+          { limit: maxReviews }
+        );
+      }
+    }
+
+    if (!businessName && !details.address && !ratingReviewData.rating) {
+      throw new Error("Business information could not be extracted from the Google Maps page.");
+    }
+
+    return {
+      businessName,
+      rating: ratingReviewData.rating,
+      reviewCount: ratingReviewData.reviewCount,
+      address: details.address,
+      phone: details.phone,
+      category: details.category,
+      website: details.website,
+      hours: details.hours,
+      latitude,
+      longitude,
+      businessImageUrls,
+      reviews,
+    };
+  } catch (err: any) {
+    if (err.message && (err.message.includes("Could not load") || err.message.includes("Business information"))) {
+      throw err;
+    }
+    throw new Error(`Browser/scraping error: ${err.message || "An error occurred during local scraping"}`);
+  } finally {
+    await browser.close().catch(() => {});
+  }
+}
