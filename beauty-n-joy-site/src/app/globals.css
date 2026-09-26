@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@theme {
+  --font-serif: var(--font-playfair), Georgia, serif;
+  --font-sans: var(--font-montserrat), system-ui, -apple-system, sans-serif;
+
+  --color-warm-ivory: #FBF7F2;
+  --color-soft-cream: #F4EDE5;
+  --color-card-bg: #FFF9F4;
+  --color-nude-beige: #E8D8C8;
+  --color-blush-nude: #F1E4DF;
+  --color-dusty-rose: #C9AAA0;
+  --color-warm-taupe: #927F74;
+  --color-mocha: #6A574D;
+  --color-deep-mocha: #4D3D35;
+  --color-champagne: #C6A36A;
+  --color-soft-border: #E5D9CF;
+  --color-text-primary: #4D3D35;
+  --color-text-[#806F66]: #806F66;
+}
+
+:root {
+  --color-ivory: #FBF7F2;
+  --color-cream: #F4EDE5;
+  --color-card: #FFF9F4;
+  --color-nude: #E8D8C8;
+  --color-blush: #F1E4DF;
+  --color-dusty-rose: #C9AAA0;
+  --color-taupe: #927F74;
+  --color-mocha: #6A574D;
+  --color-deep-mocha: #4D3D35;
+  --color-champagne: #C6A36A;
+  --color-border: #E5D9CF;
+  --color-text-primary: #4D3D35;
+  --color-text-secondary: #806F66;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: #FBF7F2;
+  color: #4D3D35;
+  font-family: var(--font-montserrat), system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-serif {
+  font-family: var(--font-playfair), Georgia, serif;
+}
+
+.font-sans {
+  font-family: var(--font-montserrat), system-ui, sans-serif;
+}
