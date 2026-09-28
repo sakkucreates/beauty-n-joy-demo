@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["playwright"],
+  images: {
+    unoptimized: true,
+  },
 };
 
 export default nextConfig;
